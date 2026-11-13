@@ -1,0 +1,137 @@
+name: Deploy prod
+run-name: Deploy ${{ inputs.version }} to prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Select a published release (refresh with Sync release versions if missing)'
+        required: true
+        type: choice
+        default: 'Select a release'
+        options:
+          # BEGIN GENERATED RELEASE OPTIONS
+          - "Select a release"
+          # END GENERATED RELEASE OPTIONS
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ inputs.version }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    env:
+      RELEASE_TAG: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate the selected release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+            echo '::error::Select main in the Run workflow branch dropdown.'
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" == 'Select a release' ]]; then
+            echo '::error::Select a release from the version dropdown. Run Sync release versions if the list is empty.'
+            exit 1
+          fi
+
+          # Only normal SemVer releases: no leading zeroes, prereleases or metadata.
+          if [[ ! "$RELEASE_TAG" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::Select a normal SemVer release, optionally prefixed with v.'
+            exit 1
+          fi
+
+          # Require a published stable release, not just a tag.
+          printf 'Looking up published release for tag: %s\n' "$RELEASE_TAG"
+          if ! release_json=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG"); then
+            printf '::error::Cannot read the published release for tag %s. Check the exact tag on the Releases page, publish it if it is a draft, and verify repository access. A Git tag or release title alone is not a published release.\n' "$RELEASE_TAG"
+            exit 1
+          fi
+          if ! jq -e --arg tag "$RELEASE_TAG" \
+            '.tag_name == $tag and .draft == false and .prerelease == false and .published_at != null' \
+            <<< "$release_json" > /dev/null; then
+            echo '::error::Production requires an existing published release that is not a prerelease.'
+            exit 1
+          fi
+
+      - name: Resolve the release tag to an exact commit
+        id: resolve
+        shell: bash
+        run: |
+          # An explicit tag avoids branch-name collisions and peels annotated tags.
+          # Release target_commitish may be a moving branch; never deploy it.
+          if ! commit_sha=$(gh api "repos/$GH_REPO/commits/tags/$RELEASE_TAG" --jq '.sha'); then
+            echo '::error::Cannot resolve the selected release tag to a commit.'
+            exit 1
+          fi
+          printf 'commit_sha=%s\n' "$commit_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Require the release commit in main
+        env:
+          COMMIT_SHA: ${{ steps.resolve.outputs.commit_sha }}
+        shell: bash
+        run: |
+          echo 'Looking up main branch.'
+          if ! main_sha=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha'); then
+            echo '::error::Cannot read the main branch. Verify that main exists and the workflow has repository access.'
+            exit 1
+          fi
+          # main must contain the exact release commit, including hotfix history.
+          printf 'Checking release commit %s against main at %s\n' "$COMMIT_SHA" "$main_sha"
+          if ! comparison_status=$(gh api "repos/$GH_REPO/compare/$COMMIT_SHA...$main_sha" --jq '.status'); then
+            echo '::error::Cannot compare the release commit with main. Check the API error above; deployment has not started.'
+            exit 1
+          fi
+          if [[ "$comparison_status" != 'ahead' && "$comparison_status" != 'identical' ]]; then
+            echo '::error::Merge the release branch into main using Create a merge commit, then manually deploy this version.'
+            {
+              printf '## Production deployment blocked\n\n'
+              printf 'Release `%s` at `%s` is not in main at `%s`.\n\n' "$RELEASE_TAG" "$COMMIT_SHA" "$main_sha"
+              printf 'Merge the release branch into main with a merge commit, then run **Deploy prod** with version `%s`.\n' "$RELEASE_TAG"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            printf '## Selected production commit\n\n'
+            printf 'Release: `%s`\n\n' "$RELEASE_TAG"
+            printf 'Commit: `%s`\n\n' "$COMMIT_SHA"
+            printf 'Verified in main at: `%s`\n' "$main_sha"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: prod
+    steps:
+      - name: Check out the selected release commit
+        uses: actions/checkout@v6
+        with:
+          # Pin before any environment approval, even if the branch later moves.
+          ref: ${{ needs.resolve-release.outputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Dummy deployment to prod
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        shell: bash
+        run: |
+          commit_sha=$(git rev-parse HEAD)
+          printf 'Dummy deployment to prod: %s at %s\n' "$RELEASE_TAG" "$commit_sha"
+          # Replace this placeholder with your build and deployment commands.
+          {
+            printf '## Dummy prod deployment\n\n'
+            printf 'Release: `%s`\n\n' "$RELEASE_TAG"
+            printf 'Commit: `%s`\n\n' "$commit_sha"
+            printf 'No application was deployed.\n'
+          } >> "$GITHUB_STEP_SUMMARY"

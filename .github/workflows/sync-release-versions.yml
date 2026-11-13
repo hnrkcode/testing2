@@ -1,0 +1,70 @@
+name: Sync release versions
+run-name: Refresh the production release dropdown
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published, edited, deleted, unpublished]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-release-versions
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refresh choices from published releases
+        env:
+          # Updating a workflow file requires Workflows: write, which the
+          # built-in GITHUB_TOKEN cannot receive.
+          GH_TOKEN: ${{ secrets.RELEASE_OPTIONS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::Set RELEASE_OPTIONS_TOKEN with Contents and Workflows read/write permissions.'
+            exit 1
+          fi
+          cd "$(mktemp -d)"
+          endpoint="repos/$GH_REPO/contents/.github/workflows/deploy-prod.yml"
+
+          # Read every page; retain exact tag names and sort SemVer numerically.
+          gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp > releases.json
+          jq -r '
+            [.[][] | select(.draft == false and .prerelease == false and .published_at != null)
+              | .tag_name | select(test("^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))]
+            | unique | sort_by([ltrimstr("v") | split(".")[] | tonumber], .) | reverse
+            | ["Select a release"] + . | .[] | "          - " + tojson
+          ' releases.json > options.txt
+
+          # Read the current file from main; replace only the marked options.
+          gh api "$endpoint?ref=main" > workflow.json
+          jq -er '.content' workflow.json | base64 --decode > original.yml
+          jq -nj --rawfile source original.yml --rawfile options options.txt \
+            --arg start '          # BEGIN GENERATED RELEASE OPTIONS' \
+            --arg end '          # END GENERATED RELEASE OPTIONS' '
+            $source |
+            if (split($start) | length) != 2 or (split($end) | length) != 2
+              or index($start) > index($end)
+            then error("Expected one ordered pair of release options markers")
+            else split($start)[0] + $start + "\n" + $options + $end + split($end)[1]
+            end
+          ' > updated.yml
+
+          if cmp -s original.yml updated.yml; then
+            echo 'Release dropdown is already up to date.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # The blob SHA prevents overwriting concurrent edits. Branch rules apply.
+          gh api --method PUT "$endpoint" --silent \
+            -f message='chore: refresh production release versions' \
+            -f branch=main \
+            -f sha="$(jq -er '.sha' workflow.json)" \
+            -f content="$(base64 -w 0 updated.yml)"
+          echo 'Updated release dropdown. Reopen Deploy prod on main to select a version. No deployment was started.' >> "$GITHUB_STEP_SUMMARY"

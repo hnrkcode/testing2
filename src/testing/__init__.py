@@ -1,0 +1,11 @@
+def main() -> None:
+    print("Hello from testing! 1")
+    print("Hello from testing! 2 <patch>")
+    print("Hello from testing! 3")
+    print("Hello from testing! 4")
+    print("Hello from testing! 5 <patch>")
+    print("Hello from testing! 6")
+    print("Hello from testing! 7 <patch>")
+    print("Hello from testing! 8")
+    print("Hello from testing! 9")
+    print("Hello from testing! 10")

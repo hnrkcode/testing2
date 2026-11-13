@@ -1,0 +1,38 @@
+name: Deploy dev
+run-name: Deploy latest main to dev
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: dev
+    steps:
+      - name: Check out the latest main commit
+        uses: actions/checkout@v6
+        with:
+          # Explicitly fetch main, regardless of the branch selected in the UI.
+          ref: refs/heads/main
+          persist-credentials: false
+
+      - name: Dummy deployment to dev
+        shell: bash
+        run: |
+          commit_sha=$(git rev-parse HEAD)
+          printf 'Dummy deployment to dev: main at %s\n' "$commit_sha"
+          # Replace this placeholder with your build and deployment commands.
+          {
+            printf '## Dummy dev deployment\n\n'
+            printf 'Branch: `main`\n\n'
+            printf 'Commit: `%s`\n\n' "$commit_sha"
+            printf 'No application was deployed.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
